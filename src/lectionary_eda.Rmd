@@ -26,7 +26,7 @@ output:
 ###################
 ## Chunk options ##
 ###################
-knitr::opts_chunk$set(echo = FALSE, cache = FALSE)
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
 if (knitr::is_html_output()) {
     knitr::opts_chunk$set(echo = TRUE)
 }
@@ -40,6 +40,7 @@ library(readxl)
 library(tidyverse)
 library(scales)
 library(knitr)
+library(DT)
 library(aveytoolkit)
 
 ###############
@@ -51,6 +52,9 @@ OTRefFile <- file.path(data_dir, "OldTestamentReference.xlsx")
 NTRefFile <- file.path(data_dir, "NewTestamentReference.xlsx")
 abbrevFile <- file.path(data_dir, "BibleAbbreviations.xlsx")
 LectSundaysFile <- file.path(data_dir, "Lectionary-SundaysAndFeasts.xlsx")
+LectWeekdaysFile <- file.path(data_dir, "Lectionary-Weekdays.xlsx")
+
+readings <- c("OT", "Psalm", "NT", "Gospel")
 
 ###############
 ## Functions ##
@@ -158,6 +162,15 @@ NTref2Pos <- NTref %>%
 ref2Pos <- bind_rows(OTref2Pos, NTref2Pos) %>%
     mutate(Pos = 1:n())
 
+## Get named list of sections with abbreviations in each one
+sections <- ref2Pos %>%
+    select(Section, Abbrv) %>%
+    distinct() %>%
+    group_by(Section) %>%
+    mutate(Abbrv = list(Abbrv)) %>%
+    distinct() %>%
+    deframe()
+
 ```
 
 # Data Overview 
@@ -188,7 +201,6 @@ ref2Pos %>%
 ###################################################
 ## Read in the Lectionary for Sundays and Feasts ##
 ###################################################
-readings <- c("OT", "Psalm", "NT", "Gospel")
 LectSundays <- map(readings, ~read_excel(LectSundaysFile, sheet = .x))
 names(LectSundays) <- readings
 
@@ -199,6 +211,17 @@ SunLect <- bind_rows(LectSundays) %>%
            YearB = grepl("B", Year),
            YearC = grepl("C", Year))
 
+#########################################
+## Read in the Lectionary for Weekdays ##
+#########################################
+LectWeekdays <- map(readings, ~read_excel(LectWeekdaysFile, sheet = .x))
+names(LectWeekdays) <- readings
+
+wdLect <- bind_rows(LectWeekdays) %>%
+    tbl_df() %>%
+    mutate(Year1 = str_detect(Year, "1"),
+           Year2 = str_detect(Year, "2"))
+
 ```
 
 Below are some entries in the lectionary including the **Reading** as well as the **Year** in the 3-year cycle (ABC means read in years A, B, and C). For this analysis, I'll ignore the **Year** and just consider the coverage over the whole 3-year cycle.
@@ -206,6 +229,11 @@ Below are some entries in the lectionary including the **Reading** as well as th
 ```{r}
 
 SunLect %>%
+    select(Reading, LectNum, Year, Day) %>%
+    head() %>%
+    kable()
+
+wdLect %>%
     select(Reading, LectNum, Year, Day) %>%
     head() %>%
     kable()
@@ -236,7 +264,7 @@ ParseFull(SunLect$Reading[2])
 
 Then, once each reading from the lectionary is parsed, it gets matched back to the reference.
 
-```{r}
+```{r parsing}
 
 ## Apply parser on the full Sunday Lectionary
 res <- SunLect %>%
@@ -255,39 +283,133 @@ res <- SunLect %>%
             pull(Pos)}))
 
 ## Combine the results with the reference
-comb_dat <- res %>%
+sun_data <- res %>%
+    unnest(Pos) %>%
+    left_join(ref2Pos, by = "Pos")
+
+
+## Apply parser on the full Weekday Lectionary
+res <- wdLect %>%
+    mutate(Pos = map(Reading, function(x) {
+        ## cat(x, sep = '\n') # debugging
+        ParseFull(x) %>%
+        left_join(ref2Pos, by = c(start = "Chapter_Verse", Abbrv = "Abbrv")) %>%
+        left_join(ref2Pos, by = c(end = "Chapter_Verse", Abbrv = "Abbrv")) %>%
+        rowwise() %>%
+            do(data.frame(Pos = if (any(is.na(.))) {
+                                    NA
+                                } else {
+                                    .$Pos.x:.$Pos.y
+                                }
+                          )) %>%
+            pull(Pos)}))
+
+## Combine the results with the reference
+wd_data <- res %>%
     unnest(Pos) %>%
     left_join(ref2Pos, by = "Pos")
 
 ```
 
+```{r debug, eval = FALSE, echo = FALSE}
+
+## Debugging
+wd_data %>%
+    filter(is.na(Pos)) %>%
+    pull(Reading) %>%
+    unique()
+
+## TODO: Replace all "+" with "," and fix other parsing failures in data
+## NOTE: Consider re-copying the data from website and then making all changes in the code since may have changed source files previously to correct errors.
+ParseFull("Jer 31:10, 11-12ab[cd], 13")
+
+```
+
+
 So each reading is parsed into multiple segments and then mapped onto the position variable (**Pos**) from the Reference. The result for one reading looks like this:
 
 ```{r}
 
-comb_dat %>%
+sun_data %>%
     select(Reading, Section, Book, Chapter, Verse, Pos) %>%
     filter(Reading == "Isa 63:16b-17, 19b; 64:2-7") %>%
     kable()
 
 ```
 
+# Analysis Questions
+
+## Are shorter books better covered?
+
+It appears that there is no consistent relationship between book length (number of verses) and the percent read on major Sundays and Feasts.
+
+```{r length_unread, fig.width = 8, fig.height = 10}
+
+verse_per_book <- ref2Pos %>%
+    group_by(Book, Abbrv, Testament, Section) %>%
+    summarize(N_Verses = n())
+
+verse_read <- sun_data %>%
+    filter(!is.na(Pos)) %>%
+    group_by(Book, Abbrv, Testament, Section) %>%
+    summarize(N_Read = n())
+    
+unread_df <- left_join(verse_per_book, verse_read,
+                    by = c("Book", "Abbrv", "Testament", "Section")) %>%
+    mutate(N_Read = ifelse(is.na(N_Read), 0, N_Read)) %>%
+    mutate(N_Unread = N_Verses - N_Read) %>%
+    mutate(Perc_Read = N_Read / N_Verses) %>%
+    mutate(Section = factor(Section, levels = names(sections)))
+
+ggplot(data = unread_df, aes(x = N_Verses, y = Perc_Read, label = Abbrv)) +
+    geom_point() +
+    geom_label() +
+    xlab("Book Length (Number of Verses)") +
+    ylab("Percent Read on Sundays and Major Feasts") +
+    scale_y_continuous(labels = function(x) percent(x, accuracy = 1)) +
+    facet_grid(Section ~ ., scales = "free_y") +
+    getBaseTheme() +
+    theme(strip.text = element_text(size = 12, face='bold'))
+    
+```
+
+## What books are not read or rarely read?
+
+### Metric: Verses
+
+The table below shows the data and you can sort by either quantity unread (**N\_Unread**) or percent unread (**Perc\_Unread**).
+
+```{r unread_table}
+
+unread_df %>%
+    select(Testament, Section, Abbrv, N_Verses, N_Read, N_Unread, Perc_Read) %>%
+    DT::datatable()
+
+not_covered <- unread_df %>%
+    filter(N_Read == 0) %>%
+    arrange(Section) %>%
+    pull(Abbrv)
+
+```
+
+The following books are not covered at all in the 3 year Sundays and Major Feast cycle: `r paste(not_covered, collapse = ', ')`
+
+### Metric: Fragmentation?
+
+We want a metric that penalizes large stretches of unread verses more than unread verses in close proximity to read verses. The ideal score would be 1 (completely read) and worst score would be 0 (completely not read). 
+
+<!-- TODO: Define and use this metric -->
+
+
 # Visualizations
 
-# Visualize the Lectionary Coverage (Bookshelf)
+## Visualize the Lectionary Coverage (Bookshelf)
 
 The inspiration behind this visualization is picturing the whole Bible as a bookshelf. There is one row for each major section (e.g., Torah, Minor Prophets, Gospels) and each section is made up of multiple books. In the visualization, lines are used to indicate coverage of a particular verse in the lectionary.
 
 ```{r viz_bookshelf, fig.width = 10, fig.height = 15, warning = FALSE}
 
 ## Get all section lengths
-sections <- ref2Pos %>%
-    select(Section, Abbrv) %>%
-    distinct() %>%
-    group_by(Section) %>%
-    mutate(Abbrv = list(Abbrv)) %>%
-    distinct() %>%
-    deframe()
 sectPos <- map_int(names(sections), function(sect) {
     abbrvs <- sections[[sect]]
     lastAbbrv <- abbrvs[length(abbrvs)]
@@ -310,7 +432,7 @@ sectLabels <- names(sections) %>%
     setNames(names(sections))
 
 ## Generate plotting data
-dat <- comb_dat %>%
+dat <- sun_data %>%
     filter(!is.na(Pos)) %>%
     select(Section, Abbrv, Chapter, Verse, Pos) %>%
     mutate(Pos = (Pos - sectPos2[Section]) / sectLength[Section]) %>%
@@ -369,8 +491,7 @@ GetCoverage <- function(abbrv) {
 
 The amount of white space clearly shows what parts of the Bible are not contained in the lectionary. For example, in the New Testament section (bottom row of the "bookshelf"), it is apparent that little of the book of *Acts* (coverage = `r percent(GetCoverage("Acts"), accuracy = 1)`) or *Revelation* (coverage = `r percent(GetCoverage("Rev"), accuracy = 1)`) are in the Sunday lectionary. 
 
-While most of the Old Testament is sparsely covered, the Psalms (abbreviated *Ps*) are one of the most covered books at `r percent(GetCoverage("Ps"), accuracy = 1)` coverage. One of the drawbacks of this visualization is that each row contains a different number of verses so that the visual sense of "fullness" can be deceiving. 
-
+While most of the Old Testament is sparsely covered, the Psalms (abbreviated *Ps*) are one of the most covered books at `r percent(GetCoverage("Ps"), accuracy = 1)` coverage. One of the drawbacks of this visualization is that each row contains a different number of verses so that the visual sense of "fullness" can be deceiving.
 
 # Acknowledgments
 
@@ -394,7 +515,7 @@ Huge kudos to Felix Just, S.J., Ph.D. for compiling these resources:
 
 ## Source Code {-}
 
-R Source code is available online [here](<PATH_TO_FILE>)
+R Source code is available online [here](https://github.com/stefanavey/lectionary-analysis/blob/master/src/lectionary_eda.Rmd)
 
 ## R Session Info {-}
 

@@ -39,10 +39,11 @@ ParseFull <- function(str) {
     str <- str_split(str, pattern = " or ")[[1]][1]
     abbrv <- str_extract(str, "^[1-9]?[ ]?[A-Za-z]+ ")[[1]] %>%
         trimws()
-    ## Remove letters that denote parts of verses and anything in parentheses
+    ## Remove letters that denote parts of verses and anything in parentheses or brackets
     str <- str_replace(str, "^[1-9]?[ ]?[A-Za-z]+ ", "") %>%
         str_replace_all("[a-z]", "") %>%
         str_replace_all("\\(.*\\)", "") %>%
+        str_replace_all("\\[.*\\]", "") %>%
         trimws()
     num <- str_count(str, "[;,]") + 1
     ## In some rare cases, a book only has 1 chapter and the chapter may be
