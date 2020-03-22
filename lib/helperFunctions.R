@@ -110,3 +110,27 @@ getBaseTheme <- function( ) {
         theme(plot.caption = element_text(size = 10, face = "italic"))
     return(base_theme)
 }
+
+##' lookup verse
+##'
+##' @description Use API.Bible to lookup the specified verse and return text
+##' @param verse_id a verse ID such as MAT.1.1 for Matthew chapter 1 verse 1 (see API)
+##' @param bible_id the bible ID (defaults to Word English Bible Catholic version)
+##' @param api_key your own API Key to query api.bible
+##'
+##' @details see \url{https://docs.api.bible/v1.2/reference} for details on the API
+##' 
+##' @return a character vector of length 1 containing the verse with HTML markup
+lookup_verse <- function(verse_id, bible_id = "9879dbb7cfe39e4d-02",
+                         api_key = API_BIBLE_KEY) {
+    require(jsonlite)
+    request <- paste0(
+        "curl --request GET \\",
+        "--url https://api.scripture.api.bible/v1/bibles/",
+        bible_id, "/verses/", verse_id,
+        ## "?content-type=text",
+        " \\",
+        "--header 'api-key: ", api_key, "\'")
+    tmp <- system(request, intern = TRUE)
+    return(fromJSON(tmp)$data$content)
+}

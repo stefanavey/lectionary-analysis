@@ -41,6 +41,9 @@ library(tidyverse)
 library(scales)
 library(knitr)
 library(DT)
+library(RColorBrewer)
+library(jsonlite)
+library(rvest)
 library(aveytoolkit)
 
 ###############
@@ -53,6 +56,8 @@ NTRefFile <- file.path(data_dir, "NewTestamentReference.xlsx")
 abbrevFile <- file.path(data_dir, "BibleAbbreviations.xlsx")
 LectSundaysFile <- file.path(data_dir, "Lectionary-SundaysAndFeasts.xlsx")
 LectWeekdaysFile <- file.path(data_dir, "Lectionary-Weekdays.xlsx")
+API_BIBLE_KEY <- system("cat ~/.api.bible/api_key", intern = TRUE)
+bible_id <- "9879dbb7cfe39e4d-02"
 
 readings <- c("OT", "Psalm", "NT", "Gospel")
 
@@ -60,10 +65,6 @@ readings <- c("OT", "Psalm", "NT", "Gospel")
 ## Functions ##
 ###############
 source(file.path("..", "lib", "helperFunctions.R"))
-
-#################
-## Import Data ##
-#################
 
 ```
 
@@ -171,6 +172,23 @@ sections <- ref2Pos %>%
     distinct() %>%
     deframe()
 
+## Get book IDs from API Bible
+request <- paste0(
+    "curl --request GET \\",
+    "--url https://api.scripture.api.bible/v1/bibles/",
+    bible_id, "/books \\",
+    "--header 'api-key: ", API_BIBLE_KEY, "\'")
+tmp <- system(request, intern = TRUE)
+apibible_books <- fromJSON(tmp)$data %>%
+                              mutate(Name = str_remove(name, fixed(" (Greek)"))) %>%
+                              mutate(Name = str_replace(Name,
+                                                        "Song of Solomon",
+                                                        "Song of Songs")) %>%
+                              mutate(Name = str_replace(Name,
+                                                        "Wisdom of Solomon",
+                                                        "Wisdom"))
+api_book_map <- deframe(select(apibible_books, Name, id))
+
 ```
 
 # Data Overview 
@@ -209,7 +227,8 @@ SunLect <- bind_rows(LectSundays) %>%
     separate(LectNum_Year, c("LectNum", "Year"), sep = '-') %>%
     mutate(YearA = grepl("A", Year),
            YearB = grepl("B", Year),
-           YearC = grepl("C", Year))
+           YearC = grepl("C", Year)) %>%
+    mutate(LectNum = as.numeric(LectNum))
 
 #########################################
 ## Read in the Lectionary for Weekdays ##
@@ -311,6 +330,12 @@ wd_data <- res %>%
 
 ```
 
+```{r combine_data}
+
+full_data <- bind_rows(sun_data, wd_data)
+
+```
+
 ```{r debug, eval = FALSE, echo = FALSE}
 
 ## Debugging
@@ -324,7 +349,6 @@ wd_data %>%
 ParseFull("Jer 31:10, 11-12ab[cd], 13")
 
 ```
-
 
 So each reading is parsed into multiple segments and then mapped onto the position variable (**Pos**) from the Reference. The result for one reading looks like this:
 
@@ -341,7 +365,7 @@ sun_data %>%
 
 ## Are shorter books better covered?
 
-It appears that there is no consistent relationship between book length (number of verses) and the percent read on major Sundays and Feasts.
+It appears that there is no consistent relationship between book length (number of verses) and the percent read in the lectionary.
 
 ```{r length_unread, fig.width = 8, fig.height = 10}
 
@@ -349,10 +373,10 @@ verse_per_book <- ref2Pos %>%
     group_by(Book, Abbrv, Testament, Section) %>%
     summarize(N_Verses = n())
 
-verse_read <- sun_data %>%
+verse_read <- full_data %>%
     filter(!is.na(Pos)) %>%
     group_by(Book, Abbrv, Testament, Section) %>%
-    summarize(N_Read = n())
+    summarize(N_Read = length(unique(Pos)))
     
 unread_df <- left_join(verse_per_book, verse_read,
                     by = c("Book", "Abbrv", "Testament", "Section")) %>%
@@ -365,7 +389,7 @@ ggplot(data = unread_df, aes(x = N_Verses, y = Perc_Read, label = Abbrv)) +
     geom_point() +
     geom_label() +
     xlab("Book Length (Number of Verses)") +
-    ylab("Percent Read on Sundays and Major Feasts") +
+    ylab("Percent Read in Lectionary (Sundays and Weekdays)") +
     scale_y_continuous(labels = function(x) percent(x, accuracy = 1)) +
     facet_grid(Section ~ ., scales = "free_y") +
     getBaseTheme() +
@@ -400,10 +424,69 @@ We want a metric that penalizes large stretches of unread verses more than unrea
 
 <!-- TODO: Define and use this metric -->
 
+## What verses are most frequently read in Lectionary?
+
+We want to see what verses are read most often at Mass.
+
+```{r frequent_verses}
+
+verse_read <- full_data %>%
+    filter(!is.na(Pos)) %>%
+    group_by(Book, Abbrv, Testament, Section, Chapter, Verse) %>%
+    summarize(Count = n()) %>%
+    ungroup() %>%
+    arrange(-Count) %>%
+    mutate(verse_id = paste(api_book_map[Book], Chapter, Verse, sep = "."))
+
+verse_read %>%
+    select(Testament, Section, Abbrv, Chapter, Verse, Count) %>%
+    DT::datatable()
+
+```
+
+We can see that the most highly read verses are from the Psalms, which is not surprising as the book of Psalms is read at nearly every mass during the responsorial.
+
+The most read verse is:
+
+```{r, results = "asis"}
+
+## Get an ID that API can use to look up the verse.
+cat(lookup_verse(verse_id = verse_read[["verse_id"]][1]))
+
+```
+
+```{r call_api, eval = FALSE, echo = FALSE}
+
+verse_id <- "MAT.1.2"
+
+## Get a passage
+passage_id <- "JHN.3.16-JHN.3.19"
+request <- paste0(
+    "curl --request GET \\",
+    "--url https://api.scripture.api.bible/v1/bibles/",
+    bible_id, "/passages/", passage_id,
+    "?content-type=text \\",
+    "--header 'api-key: ", API_BIBLE_KEY, "\'")
+tmp <- system(request, intern = TRUE)
+fromJSON(tmp)$data$content
+
+## Search
+search <- "Psalm%203%98.3"
+request <- paste0(
+    "curl --request GET \\",
+    "--url https://api.scripture.api.bible/v1/bibles/",
+    bible_id,
+    "/search?query=", search,
+    " \\",
+    "--header 'api-key: ", API_BIBLE_KEY, "\'")
+tmp <- system(request, intern = TRUE)
+html_text(read_html(fromJSON(tmp)$data$passages$content))
+
+```
 
 # Visualizations
 
-## Visualize the Lectionary Coverage (Bookshelf)
+## "Bookshelf" Visualization
 
 The inspiration behind this visualization is picturing the whole Bible as a bookshelf. There is one row for each major section (e.g., Torah, Minor Prophets, Gospels) and each section is made up of multiple books. In the visualization, lines are used to indicate coverage of a particular verse in the lectionary.
 
@@ -432,7 +515,7 @@ sectLabels <- names(sections) %>%
     setNames(names(sections))
 
 ## Generate plotting data
-dat <- sun_data %>%
+plot_data <- full_data %>%
     filter(!is.na(Pos)) %>%
     select(Section, Abbrv, Chapter, Verse, Pos) %>%
     mutate(Pos = (Pos - sectPos2[Section]) / sectLength[Section]) %>%
@@ -452,18 +535,22 @@ book_dat <- ref2Pos %>%
     mutate(y = rep(c(0, 0.33, 0.66, 1), length.out = n())) %>%
     ungroup()
 
+cols <- rep(brewer.pal(n = 5, name = "Set2"), length.out = length(unique(plot_data$Abbrv)))
+names(cols) <- unique(plot_data$Abbrv)
+
 ## Create the plot
-gg <- ggplot(dat, x = 0, y = 1) +
+gg <- ggplot(plot_data, x = 0, y = 1) +
     geom_vline(aes(xintercept = Pos, color = Abbrv), show.legend = FALSE) +
     geom_label(data = book_dat, aes(x = Pos, y = y, label = Abbrv),
-               hjust = 0, size = 3.5) +    
+               hjust = 0, size = 3.5) +
+    scale_color_manual(values = cols) +
     scale_x_continuous(labels = percent) +    
     scale_y_continuous(labels = NULL, breaks = NULL) +
     xlab("") +
     ylab("") +
-    ggtitle(paste("Bible Coverage of Catholic Lectionary for",
-                  "Sundays and Major Feasts", sep = '\n')) +
-    labs(caption = "Three Year Cycle") +
+    ggtitle("Bible Coverage of Catholic Lectionary") +
+    labs(caption = paste("Includes Sundays and Major Feasts (3 year cycle)",
+                         "plus Weekdays (2 year cycle)")) +
     facet_grid(SectionLabel ~ ., scales = "fixed") +
     getBaseTheme() +
     theme(strip.text = element_text(size = 10, face = "bold"))
@@ -479,7 +566,7 @@ GetCoverage <- function(abbrv) {
         select(Chapter_Verse) %>%
         distinct() %>%
         nrow()
-    cov <- dat %>%
+    cov <- plot_data %>%
         filter(Abbrv == abbrv) %>%
         select(Pos) %>%
         distinct() %>%
@@ -492,6 +579,51 @@ GetCoverage <- function(abbrv) {
 The amount of white space clearly shows what parts of the Bible are not contained in the lectionary. For example, in the New Testament section (bottom row of the "bookshelf"), it is apparent that little of the book of *Acts* (coverage = `r percent(GetCoverage("Acts"), accuracy = 1)`) or *Revelation* (coverage = `r percent(GetCoverage("Rev"), accuracy = 1)`) are in the Sunday lectionary. 
 
 While most of the Old Testament is sparsely covered, the Psalms (abbreviated *Ps*) are one of the most covered books at `r percent(GetCoverage("Ps"), accuracy = 1)` coverage. One of the drawbacks of this visualization is that each row contains a different number of verses so that the visual sense of "fullness" can be deceiving.
+
+## Barplot
+
+Now, instead of visualizing the covered verses in order, consider just the question of how much of each book in the Bible is covered by the Catholic Lectionary?
+
+```{r viz_barplot, fig.width = 8, fig.height = 15}
+
+verse_per_book <- ref2Pos %>%
+    group_by(Book, Abbrv, Testament, Section) %>%
+    summarize(N_Verses = n()) %>%
+    ungroup()
+
+verse_read <- full_data %>%
+    filter(!is.na(Pos)) %>%
+    group_by(Book, Abbrv, Testament, Section) %>%
+    summarize(N_Read = length(unique(Pos))) %>%
+    ungroup()
+    
+plot_data <- left_join(verse_per_book, verse_read,
+                    by = c("Book", "Abbrv", "Testament", "Section")) %>%
+    mutate(N_Read = ifelse(is.na(N_Read), 0, N_Read)) %>%
+    mutate(N_Unread = N_Verses - N_Read) %>%
+    mutate(Perc_Read = N_Read / N_Verses) %>%
+    mutate(Section = factor(Section, levels = names(sections))) %>%
+    arrange(Perc_Read) %>%
+    mutate(Abbrv = factor(Abbrv, levels = unique(Abbrv)))
+
+cols <- brewer.pal(n = 7, name = "Dark2")[c(1, 3, 7, 4, 2, 6, 5)]
+names(cols) <- levels(plot_data$Section)
+
+ggplot(data = plot_data, aes(x = Abbrv, y = Perc_Read, fill = Section)) +
+    geom_col() +
+    coord_flip() +
+    xlab("Book") +
+    ylab("Percent Read in Lectionary") +
+    scale_y_continuous(labels = function(x) percent(x, accuracy = 1)) +
+    scale_fill_manual(values = cols) +
+    labs(caption = paste("Includes Sundays and Major Feasts (3 year cycle)",
+                         "plus Weekdays (2 year cycle)")) +
+    getBaseTheme() +
+    theme(strip.text = element_text(size = 12, face='bold'),
+          legend.pos = "top")
+    
+```
+
 
 # Acknowledgments
 
