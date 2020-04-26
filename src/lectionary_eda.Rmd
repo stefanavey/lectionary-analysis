@@ -459,7 +459,7 @@ cat(lookup_verse(verse_id = verse_read[["verse_id"]][1]))
 
 verse_id <- "MAT.1.2"
 
-## Get a passage
+## Get a passage (NOTE format includes book twice)
 passage_id <- "JHN.3.16-JHN.3.19"
 request <- paste0(
     "curl --request GET \\",
