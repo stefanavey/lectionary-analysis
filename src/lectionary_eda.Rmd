@@ -336,6 +336,20 @@ full_data <- bind_rows(sun_data, wd_data)
 
 ```
 
+### Parsing Errors
+
+There are some parsing errors that need to be resolved. The table below shows all the readings from the lectionary which are *not* properly matched to the reference and need some manual intervention.
+
+```{r parse_errors}
+
+## Debugging
+wd_data %>%
+    filter(is.na(Pos)) %>%
+    select(Reading) %>%
+    kable()
+
+```
+
 ```{r debug, eval = FALSE, echo = FALSE}
 
 ## Debugging
@@ -418,11 +432,199 @@ not_covered <- unread_df %>%
 
 The following books are not covered at all in the 3 year Sundays and Major Feast cycle: `r paste(not_covered, collapse = ', ')`
 
-### Metric: Fragmentation?
+### Metric: Chapters Covered
 
-We want a metric that penalizes large stretches of unread verses more than unread verses in close proximity to read verses. The ideal score would be 1 (completely read) and worst score would be 0 (completely not read). 
+Another way to consider how much is read in each book is to think about the concept of coverage. Two books could have the same percent of verses read but one could be all at the beginning of the book and the other spread throughout all chapters of the book. This can be seen a bit visually in the ["bookshelf" visualization](#bookshelf) but here we quantify this by calculating the coverage at the chapter level and comparing percent of verses read with percent of chapters with at least some level of coverage.
 
-<!-- TODO: Define and use this metric -->
+```{r chap_coverage}
+
+min_coverage <- 0.10
+min_coverage_perc <- percent(min_coverage, accuracy = 1)
+coverage <- full_data %>%
+    filter(!is.na(Pos)) %>%
+    full_join(ref2Pos, by = c("Section", "Book", "Chapter", "Verses", "Abbrv", "Verse",
+                              "Chapter_Verse", "Pos", "Testament")) %>%
+    select(Reading, Section, Abbrv, Chapter, Verse, Pos) %>%
+    mutate(Coverage = as.numeric(!is.na(Reading))) %>%
+    arrange(Pos) %>%
+    filter(!duplicated(Pos)) %>%
+    group_by(Section, Abbrv, Chapter) %>%
+    summarize(N_Verses = max(Pos) - min(Pos) + 1,
+              N_Read = sum(Coverage),
+              Perc_Read = N_Read / N_Verses,
+              Chap_Covered = Perc_Read > min_coverage) %>%
+    group_by(Section, Abbrv) %>%
+    summarize(N_Verses = sum(N_Verses),
+              N_Read = sum(N_Read),
+              Perc_Read = N_Read / N_Verses,
+              Perc_Chapters_Covered = mean(Chap_Covered))
+
+coverage %>%
+    mutate(Perc_Chapters_Covered = round(Perc_Chapters_Covered, 2)) %>%
+    mutate(Perc_Read = round(Perc_Read, 2)) %>%
+    select(Section, Abbrv, N_Verses, N_Read, Perc_Read, Perc_Chapters_Covered) %>%
+    DT::datatable()
+
+```
+
+The table above shows how the number of chapters covered (by reading at least `r min_coverage_perc` of verses in the chapter). The plot below shows that there is some interesting variation between this metric and just looking at the total percent read in each book. For example, comparing Col and 1 John we see that they have similar percent of chapters covered (75% vs 80%) even though 1 John has 90% of verses read while Col only has 66% read. They are books with similar length. This indicates that while there is less read in Col, the coverage is similar in terms of hitting 80% of chapters with at least `r min_coverage_perc` coverage.
+
+```{r chap_coverage_plot, fig.width = 8, fig.height = 10}
+
+ggplot(data = coverage, aes(x = Perc_Read, y = Perc_Chapters_Covered, label = Abbrv)) +
+    geom_point() +
+    geom_label() +
+    xlab("Percent Read in Lectionary (Sundays and Weekdays)") +
+    ylab(paste("Percent of Chapters Where At Least", min_coverage_perc, "of Verses Read")) +
+    scale_x_continuous(labels = function(x) percent(x, accuracy = 1)) +    
+    scale_y_continuous(labels = function(x) percent(x, accuracy = 1)) +
+    facet_grid(Section ~ .) +
+    getBaseTheme() +
+    theme(strip.text = element_text(size = 12, face='bold'))
+    
+```
+
+<!-- ### Metric: Gap Penalty -->
+
+<!-- We want a metric that penalizes large stretches of unread verses more than unread verses in close proximity to read verses. -->
+
+<!-- Here we borrow the idea of gap penalties from bioinformatics sequence alignment. An affine gap penalty of the form $$A + B \cdot L$$ is used where $A$ is the cost of opening a gap, $B$ is the cost of extending a gap, and $L$ is the length of the gap. In bioinformatics this is used to optimize alignment of two genetic sequences. In the context of the lectionary, we can use the same penalty function to calculate a score. Since we have different verse lengths for each book, we will normalize by the verse length, $V$ and sum up the gap penalties for all gaps in each book. -->
+
+<!-- $$ \frac{1}{V}\sum_{g \in GAPS}{A + B \cdot L_{g}} $$ -->
+
+<!-- Here we set B to be 20 times larger than A so that the penalty for opening a gap is small but the penalty for extending a gap is large. -->
+
+```{r gap_penalty, eval = FALSE}
+
+## Algorithm assumes that the lectionary data frame has valid Reading entry
+stopifnot(all(!is.na(full_data$Reading)))
+
+##' calculate_gap_penalty
+##'
+##' Calculate the sum of gap penalties from a vector of coverage 
+##' 
+##' @param x numeric vector of coverage with 0 indicating not covered and 1 indicating covered
+##'
+##' @param A numeric penalty for opening a gap
+##' @param B numeric penalty for extending a gap. The length of gap is raised to this power
+##' @details gaps are extracted from x by considering 1 or more values of 0 as
+##'     gaps in coverage. Defaults to small penalty for opening a gap since some
+##'     verses here and then can be skipped and larger penalty for extending a
+##'     gap.
+##' @return a single numeric value giving the sum of gap penalties normalized by
+##'     length of input vector.
+##'
+##' @examples
+##' set.seed(1234)
+##' len <- 20
+##' x_half <- rep(c(1, 0), each = len/2)
+##' x_quart <- rep(rep(c(1, 0), each = len/4), 2)
+##' x_random <- sample(x_half)
+##' calculate_gap_penalty(x_random)
+##' calculate_gap_penalty(x_half)
+##' calculate_gap_penalty(x_quart)
+##'
+##' len <- 40
+##' x_random <- rep(x_random, 2)
+##' x_half <- rep(c(1, 0), each = len/2)
+##' x_quart <- rep(rep(c(1, 0), each = len/4), 2)
+##' calculate_gap_penalty(x_random)
+##' calculate_gap_penalty(x_half)
+##' calculate_gap_penalty(x_quart)
+calculate_gap_penalty <- function(x, A = 0, B = 2) {
+    ## Check that x is an atomic vector of type numeric and that it only contains 0 or 1.
+    stopifnot(is.atomic(x) && is.numeric(x))
+    stopifnot(all(x == 0 | x == 1))
+    ## Handle edge cases of all 0's by considering it 1 gap of length(x)
+    if (all(x == 0)) {
+        return(0)
+    }
+    ## Get vector L of lengths of all gaps (one entry per gap)
+    L <- c()
+    in_gap <- FALSE
+    gap_length <- 0
+    for(ii in seq_along(x)) {
+        if (x[ii] == 0 && in_gap) {
+            gap_length <- gap_length + 1
+        } else if (x[ii] == 0 && !in_gap) {
+            in_gap <- TRUE
+            gap_length <- gap_length + 1            
+        } else if (x[ii] == 1 && in_gap) {
+            L <- c(L, gap_length)
+            in_gap <- FALSE
+            gap_length <- 0
+        }
+        ## Handle case where x ends in 0's
+        if (ii == length(x) && in_gap) {
+            L <- c(L, gap_length)
+        }
+    }
+    return(sum(A + (L / length(x))^B))
+}
+
+gap_data <- full_data %>%
+    filter(!is.na(Pos)) %>%
+    full_join(ref2Pos, by = c("Section", "Book", "Chapter", "Verses", "Abbrv", "Verse",
+                              "Chapter_Verse", "Pos", "Testament")) %>%
+    select(Reading, Section, Abbrv, Chapter, Verse, Pos) %>%
+    mutate(Coverage = as.numeric(!is.na(Reading))) %>%
+    arrange(Pos) %>%
+    filter(!duplicated(Pos)) %>%
+    group_by(Section, Abbrv) %>%
+    summarize(N_Verses = max(Pos) - min(Pos) + 1,
+              N_Read = sum(Coverage),
+              Gap_Penalty = calculate_gap_penalty(Coverage)) %>%
+    mutate(Perc_Read = N_Read / N_Verses) %>%
+    ungroup() %>%
+    arrange(-Gap_Penalty)
+
+gap_data %>%
+    mutate(Gap_Penalty = round(Gap_Penalty, 2)) %>%
+    mutate(Perc_Read = round(Perc_Read, 2)) %>%
+    select(Section, Abbrv, N_Verses, N_Read, Perc_Read, Gap_Penalty) %>%
+    DT::datatable()
+
+plot(gap_data$Perc_Read, gap_data$Gap_Penalty)
+
+## Compare 1 Tim vs. 2 John
+c1 <- gap_data %>%
+    filter(Abbrv == "1 Tim") %>%
+    pull(Coverage)
+c2 <- gap_data %>%
+    filter(Abbrv == "2 John") %>%
+    pull(Coverage)
+
+## NOTE: This doesn't really work well and can't compare sequences of different sizes. Tried affine gap penalty as well as other variations like square of length but couldn't get desired outcome on toy examples. Decided to go with something more statistical.
+
+```
+
+```{r statistical_nonrandomness, eval = FALSE}
+
+## IDEAS:
+## - Calculate AUC of data or smoothed data?
+## - Think of null hypothesis and perform statistical test
+len <- 20
+x_half <- rep(c(1, 0), each = len/2)
+x_quart <- rep(rep(c(1, 0), each = len/4), 2)
+x_random <- sample(x_half)
+
+plot_data <- tibble(x = 1:len, x_random, x_quart, x_half)
+
+ggplot(data = plot_data, aes(x = x, y = x_random)) +
+    geom_point() +
+    geom_line()
+
+ggplot(data = plot_data, aes(x = x, y = x_half)) +
+    geom_point() +
+    geom_line()
+
+ggplot(data = plot_data, aes(x = x, y = x_quart)) +
+    geom_point() +
+    geom_line()
+
+
+
+```
 
 ## What verses are most frequently read in Lectionary?
 
@@ -486,7 +688,7 @@ html_text(read_html(fromJSON(tmp)$data$passages$content))
 
 # Visualizations
 
-## "Bookshelf" Visualization
+## "Bookshelf" Visualization {#bookshelf}
 
 The inspiration behind this visualization is picturing the whole Bible as a bookshelf. There is one row for each major section (e.g., Torah, Minor Prophets, Gospels) and each section is made up of multiple books. In the visualization, lines are used to indicate coverage of a particular verse in the lectionary.
 
